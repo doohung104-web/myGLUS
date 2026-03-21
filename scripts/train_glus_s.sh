@@ -4,11 +4,11 @@ MASTER_PORT=$((25000 + $RANDOM % 100))
 
 # Feel free to modify these
 
-DIR_PATH=''
+DIR_PATH='/2025900123/yrr/GLUS'
 
 PATH_TO_CHECKPOINTS=$DIR_PATH/checkpoints
-PATH_TO_DATA=$DIR_PATH/data
-SAVE_DIR=$DIR_PATH/outputs
+PATH_TO_DATA=$DIR_PATH/DATASET
+SAVE_DIR=$DIR_PATH/outputs/NEWS1_$(date +%Y%m%d)
 
 deepspeed --master_port=$MASTER_PORT train_ds.py \
   --version "$PATH_TO_CHECKPOINTS/LISA-7B-v1" \
