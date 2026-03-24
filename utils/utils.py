@@ -12,11 +12,13 @@ DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
 DEFAULT_IM_START_TOKEN = "<im_start>"
 DEFAULT_IM_END_TOKEN = "<im_end>"
+TRAJ_TOKEN_INDEX = -300
+DEFAULT_TRAJ_TOKEN = "<traj>"
 
 CONTEXT_INFO_LIST = [
-    DEFAULT_IMAGE_TOKEN * CONTEXT_FRAME_NUM + "\n" 
+    DEFAULT_IMAGE_TOKEN * CONTEXT_FRAME_NUM + "\n"
     + "Please finished the following tasks on the context frames above."
-    + "\n",
+    + "\n" + DEFAULT_TRAJ_TOKEN,
 ]
 
 SHORT_QUESTION_LIST = [

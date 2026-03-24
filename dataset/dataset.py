@@ -20,7 +20,7 @@ from sam2.utils.transforms import SAM2Transforms
 from .conversation import get_default_conv_template
 
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
-                    DEFAULT_IMAGE_TOKEN)
+                    DEFAULT_IMAGE_TOKEN, DEFAULT_TRAJ_TOKEN)
 
 from .refer_video_seg_dataset import ReferVideoSegDataset
 
@@ -40,6 +40,7 @@ def collate_fn(
     offset_list = [0]
     sampled_str_ids_list = []
     sampled_frames_list = []
+    trajectories_list = []
     cnt = 0
     inferences = []
     for (
@@ -54,6 +55,7 @@ def collate_fn(
         sampled_classes,
         sampled_str_ids,
         sampled_frames,
+        trajectory,
         inference,
     ) in batch:
         image_path_list.append(image_path)
@@ -67,6 +69,7 @@ def collate_fn(
         sampled_classes_list.append(sampled_classes)
         sampled_str_ids_list.append(sampled_str_ids)
         sampled_frames_list.append(sampled_frames)
+        trajectories_list.append(trajectory)
         cnt += len(conversations)
         offset_list.append(cnt)
         inferences.append(inference)
@@ -114,7 +117,7 @@ def collate_fn(
             assert len(parts) == 2, (len(parts), rou)
             parts[0] += sep
 
-            if DEFAULT_IMAGE_TOKEN in conversation:
+            if DEFAULT_IMAGE_TOKEN in conversation or DEFAULT_TRAJ_TOKEN in conversation:
                 round_len = len(tokenizer_image_token(rou, tokenizer))
                 instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
             else:
@@ -157,6 +160,7 @@ def collate_fn(
         "conversation_list": conversation_list,
         "sampled_str_ids_list": sampled_str_ids_list,
         "sampled_frames_list": sampled_frames_list,
+        "trajectories": torch.stack(trajectories_list, dim=0),
     }
 
 

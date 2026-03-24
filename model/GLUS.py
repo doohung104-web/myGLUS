@@ -15,6 +15,7 @@ from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
 
 from .llava.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
                                                      LlavaLlamaModel)
+from .trajectory_encoder import TrajectoryEncoder
 from sam2.build_sam import build_sam2
 from sam2.utils.transforms import SAM2Transforms
 
@@ -85,6 +86,7 @@ class GlusMetaModel:
         if not hasattr(self.config, "train_mask_decoder"):
             self.config.train_mask_decoder = kwargs["train_mask_decoder"]
             self.config.out_dim = kwargs["out_dim"]
+            self.config.traj_max_time_steps = kwargs.get("traj_max_time_steps", 4)
             self.vision_pretrained = kwargs.get("vision_pretrained", None)
         else:
             self.vision_pretrained = kwargs.get("vision_pretrained", None)
@@ -112,6 +114,16 @@ class GlusMetaModel:
         self.text_hidden_fcs = nn.ModuleList([nn.Sequential(*text_fc)])
         self.text_hidden_fcs.train()
         for param in self.text_hidden_fcs.parameters():
+            param.requires_grad = True
+
+        # Trajectory encoder: [B, T, 2] → [B, 1, hidden_size]
+        traj_max_time_steps = getattr(config, "traj_max_time_steps", 4)
+        self.trajectory_encoder = TrajectoryEncoder(
+            max_time_steps=traj_max_time_steps,
+            hidden_dim=config.hidden_size,
+        )
+        self.trajectory_encoder.train()
+        for param in self.trajectory_encoder.parameters():
             param.requires_grad = True
             
 
@@ -307,6 +319,7 @@ class GLUSForCausalLM(LlavaLlamaForCausalLM):
         rel_pos_list: List[int],
         sampled_str_ids_list: List[List[str]],
         sampled_frames_list: List[List[str]],
+        trajectories: torch.FloatTensor = None,
         inference: bool = False,
         context_frame_num: int = 4,
         question_frame_num: int = 4,
@@ -366,7 +379,19 @@ class GLUSForCausalLM(LlavaLlamaForCausalLM):
                 images_clip_list.append(images_clip_i)
             images_clip = torch.cat(images_clip_list, dim=0)
             torch.cuda.empty_cache()
-            
+
+            # Encode trajectories → [B, 1, hidden_size], then expand to total conversations
+            traj_tokens = None
+            if trajectories is not None:
+                traj_tokens_per_batch = self.model.trajectory_encoder(trajectories)  # [B, 1, D]
+                traj_tokens_list = []
+                for i in range(len(offset) - 1):
+                    start_i, end_i = offset[i], offset[i + 1]
+                    traj_tokens_list.append(
+                        traj_tokens_per_batch[i].unsqueeze(0).expand(end_i - start_i, -1, -1)
+                    )
+                traj_tokens = torch.cat(traj_tokens_list, dim=0)  # [total_conv, 1, D]
+
             output = super().forward(
                 images=images_clip,
                 attention_mask=attention_masks,
@@ -374,6 +399,7 @@ class GLUSForCausalLM(LlavaLlamaForCausalLM):
                 labels=labels,
                 output_hidden_states=True,
                 specific_ce_loss=True,
+                traj_tokens=traj_tokens,
             )
             output_hidden_states = output.hidden_states
 

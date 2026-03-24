@@ -310,7 +310,28 @@ class ReferVideoSegDataset(Dataset):
         else:
             raise ValueError(f"No such ds {ds}.")
         label = torch.ones(masks.shape[2], masks.shape[3]) * self.ignore_label
-        
+
+        # Compute trajectory from question-frame mask centroids (first expression)
+        trajectory_points = []
+        for i in range(self.question_frame_num):
+            if masks.shape[0] > 0 and original_w > 0 and original_h > 0:
+                mask_i = masks[0, i].cpu().numpy()  # [H, W]
+                ys, xs = np.where(mask_i > 0)
+                if len(xs) > 0:
+                    cx = float(xs.mean()) / original_w
+                    cy = float(ys.mean()) / original_h
+                    trajectory_points.append([cx, cy])
+                else:
+                    trajectory_points.append([0.0, 0.0])
+            else:
+                trajectory_points.append([0.0, 0.0])
+
+        trajectory = np.array(trajectory_points, dtype=np.float32)  # [T, 2]
+        # Express as displacement relative to the first frame's centroid
+        if trajectory.shape[0] > 1:
+            trajectory = trajectory - trajectory[0:1]
+        trajectory = torch.from_numpy(trajectory)  # [T, 2]
+
         return (
             image_path,
             images,
@@ -323,4 +344,5 @@ class ReferVideoSegDataset(Dataset):
             sampled_classes,
             sampled_str_ids,
             sampled_frames,
+            trajectory,
         )

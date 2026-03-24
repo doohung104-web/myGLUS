@@ -1,11 +1,12 @@
 import base64
+import re
 from io import BytesIO
 
 import torch
 from PIL import Image
 from transformers import StoppingCriteria
 
-from .constants import IMAGE_TOKEN_INDEX
+from .constants import IMAGE_TOKEN_INDEX, TRAJ_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_TRAJ_TOKEN
 
 
 def load_image_from_base64(image):
@@ -19,23 +20,31 @@ def process_images(images, image_processor, model_cfg):
 def tokenizer_image_token(
     prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None
 ):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split("<image>")]
-
-    def insert_separator(X, sep):
-        return [ele for sublist in zip(X, [sep] * len(X)) for ele in sublist][:-1]
+    # Split on both <image> and <traj> special tokens using regex
+    special_token_pattern = re.compile(
+        r'(' + re.escape(DEFAULT_IMAGE_TOKEN) + r'|' + re.escape(DEFAULT_TRAJ_TOKEN) + r')'
+    )
+    parts = special_token_pattern.split(prompt)
 
     input_ids = []
-    offset = 0
-    if (
-        len(prompt_chunks) > 0
-        and len(prompt_chunks[0]) > 0
-        and prompt_chunks[0][0] == tokenizer.bos_token_id
-    ):
-        offset = 1
-        input_ids.append(prompt_chunks[0][0])
-
-    for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
-        input_ids.extend(x[offset:])
+    first_chunk = True
+    for part in parts:
+        if part == DEFAULT_IMAGE_TOKEN:
+            input_ids.append(image_token_index)
+            first_chunk = False
+        elif part == DEFAULT_TRAJ_TOKEN:
+            input_ids.append(TRAJ_TOKEN_INDEX)
+            first_chunk = False
+        elif part != '':
+            chunk_ids = tokenizer(part).input_ids
+            if (
+                not first_chunk
+                and len(chunk_ids) > 0
+                and chunk_ids[0] == tokenizer.bos_token_id
+            ):
+                chunk_ids = chunk_ids[1:]
+            first_chunk = False
+            input_ids.extend(chunk_ids)
 
     if return_tensors is not None:
         if return_tensors == "pt":
