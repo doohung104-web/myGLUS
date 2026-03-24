@@ -21,7 +21,7 @@ import torch.nn as nn
 # from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
                          DEFAULT_IMAGE_PATCH_TOKEN, IGNORE_INDEX,
-                         IMAGE_TOKEN_INDEX)
+                         IMAGE_TOKEN_INDEX, TRAJ_TOKEN_INDEX)
 
 from .multimodal_encoder.builder import build_vision_tower
 
@@ -105,7 +105,8 @@ class LlavaMetaForCausalLM(ABC):
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
-        self, input_ids, attention_mask, past_key_values, labels, images
+        self, input_ids, attention_mask, past_key_values, labels, images,
+        traj_tokens=None,
     ):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
@@ -135,7 +136,10 @@ class LlavaMetaForCausalLM(ABC):
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
-            if (cur_input_ids == IMAGE_TOKEN_INDEX).sum() == 0:
+            if (
+                (cur_input_ids == IMAGE_TOKEN_INDEX).sum() == 0
+                and (cur_input_ids == TRAJ_TOKEN_INDEX).sum() == 0
+            ):
                 # multimodal LLM, but the current sample is not multimodal
                 cur_input_embeds = self.get_model().embed_tokens(cur_input_ids)
                 cur_input_embeds = (
@@ -149,100 +153,142 @@ class LlavaMetaForCausalLM(ABC):
                     new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
                 continue
-            image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
-            # print(image_token_indices.numel())
+
             cur_new_input_embeds = []
             if labels is not None:
                 cur_labels = labels[batch_idx]
                 cur_new_labels = []
                 assert cur_labels.shape == cur_input_ids.shape
-            while image_token_indices.numel() > 0:
-                # print(image_features.shape)
-                cur_image_features = image_features[cur_image_idx]
-                image_token_start = image_token_indices[0]
-                if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
-                    self.config, "mm_use_im_start_end", False
-                ):
+
+            while True:
+                img_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
+                traj_indices = torch.where(cur_input_ids == TRAJ_TOKEN_INDEX)[0]
+
+                has_img = img_indices.numel() > 0
+                has_traj = traj_indices.numel() > 0
+
+                if not has_img and not has_traj:
+                    break
+
+                # Process the special token that appears earliest in the sequence
+                process_traj = has_traj and (
+                    not has_img or traj_indices[0] < img_indices[0]
+                )
+
+                if process_traj:
+                    traj_token_start = traj_indices[0]
                     cur_new_input_embeds.append(
-                        self.get_model()
-                        .embed_tokens(cur_input_ids[: image_token_start - 1])
-                        .detach()
+                        self.get_model().embed_tokens(cur_input_ids[:traj_token_start])
                     )
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(
-                            cur_input_ids[image_token_start - 1 : image_token_start]
+                    if traj_tokens is not None:
+                        cur_traj_embed = traj_tokens[batch_idx].to(device=self.device)  # [1, D]
+                    else:
+                        cur_traj_embed = torch.zeros(
+                            1,
+                            self.config.hidden_size,
+                            dtype=self.get_model().embed_tokens.weight.dtype,
+                            device=self.device,
                         )
-                    )
-                    cur_new_input_embeds.append(cur_image_features)
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(
-                            cur_input_ids[image_token_start + 1 : image_token_start + 2]
-                        )
-                    )
+                    cur_new_input_embeds.append(cur_traj_embed)
                     if labels is not None:
-                        cur_new_labels.append(cur_labels[:image_token_start])
+                        cur_new_labels.append(cur_labels[:traj_token_start])
                         cur_new_labels.append(
                             torch.full(
-                                (cur_image_features.shape[0],),
+                                (1,),
                                 IGNORE_INDEX,
                                 device=labels.device,
                                 dtype=labels.dtype,
                             )
                         )
-                        cur_new_labels.append(
-                            cur_labels[image_token_start : image_token_start + 1]
-                        )
-                        cur_labels = cur_labels[image_token_start + 2 :]
-                elif getattr(self.config, "mm_use_im_start_end", False):
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(cur_input_ids[:image_token_start])
-                    )
-                    cur_new_input_embeds.append(cur_image_features)
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(
-                            cur_input_ids[image_token_start + 1 : image_token_start + 2]
-                        )
-                    )
-                    if labels is not None:
-                        cur_new_labels.append(cur_labels[:image_token_start])
-                        cur_new_labels.append(
-                            torch.full(
-                                (cur_image_features.shape[0],),
-                                IGNORE_INDEX,
-                                device=labels.device,
-                                dtype=labels.dtype,
-                            )
-                        )
-                        cur_new_labels.append(
-                            cur_labels[image_token_start + 1 : image_token_start + 2]
-                        )
-                        cur_labels = cur_labels[image_token_start + 2 :]
+                        cur_labels = cur_labels[traj_token_start + 1:]
+                    cur_input_ids = cur_input_ids[traj_token_start + 1:]
                 else:
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(cur_input_ids[:image_token_start])
-                    )
-                    cur_new_input_embeds.append(cur_image_features)
-                    if labels is not None:
-                        cur_new_labels.append(cur_labels[:image_token_start])
-                        cur_new_labels.append(
-                            torch.full(
-                                (cur_image_features.shape[0],),
-                                IGNORE_INDEX,
-                                device=labels.device,
-                                dtype=labels.dtype,
+                    # Process image token
+                    cur_image_features = image_features[cur_image_idx]
+                    image_token_start = img_indices[0]
+                    if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
+                        self.config, "mm_use_im_start_end", False
+                    ):
+                        cur_new_input_embeds.append(
+                            self.get_model()
+                            .embed_tokens(cur_input_ids[: image_token_start - 1])
+                            .detach()
+                        )
+                        cur_new_input_embeds.append(
+                            self.get_model().embed_tokens(
+                                cur_input_ids[image_token_start - 1 : image_token_start]
                             )
                         )
-                        cur_labels = cur_labels[image_token_start + 1 :]
-                cur_image_idx += 1
-                if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
-                    self.config, "mm_use_im_start_end", False
-                ):
-                    cur_input_ids = cur_input_ids[image_token_start + 2 :]
-                elif getattr(self.config, "mm_use_im_start_end", False):
-                    cur_input_ids = cur_input_ids[image_token_start + 2 :]
-                else:
-                    cur_input_ids = cur_input_ids[image_token_start + 1 :]
-                image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
+                        cur_new_input_embeds.append(cur_image_features)
+                        cur_new_input_embeds.append(
+                            self.get_model().embed_tokens(
+                                cur_input_ids[image_token_start + 1 : image_token_start + 2]
+                            )
+                        )
+                        if labels is not None:
+                            cur_new_labels.append(cur_labels[:image_token_start])
+                            cur_new_labels.append(
+                                torch.full(
+                                    (cur_image_features.shape[0],),
+                                    IGNORE_INDEX,
+                                    device=labels.device,
+                                    dtype=labels.dtype,
+                                )
+                            )
+                            cur_new_labels.append(
+                                cur_labels[image_token_start : image_token_start + 1]
+                            )
+                            cur_labels = cur_labels[image_token_start + 2 :]
+                    elif getattr(self.config, "mm_use_im_start_end", False):
+                        cur_new_input_embeds.append(
+                            self.get_model().embed_tokens(cur_input_ids[:image_token_start])
+                        )
+                        cur_new_input_embeds.append(cur_image_features)
+                        cur_new_input_embeds.append(
+                            self.get_model().embed_tokens(
+                                cur_input_ids[image_token_start + 1 : image_token_start + 2]
+                            )
+                        )
+                        if labels is not None:
+                            cur_new_labels.append(cur_labels[:image_token_start])
+                            cur_new_labels.append(
+                                torch.full(
+                                    (cur_image_features.shape[0],),
+                                    IGNORE_INDEX,
+                                    device=labels.device,
+                                    dtype=labels.dtype,
+                                )
+                            )
+                            cur_new_labels.append(
+                                cur_labels[image_token_start + 1 : image_token_start + 2]
+                            )
+                            cur_labels = cur_labels[image_token_start + 2 :]
+                    else:
+                        cur_new_input_embeds.append(
+                            self.get_model().embed_tokens(cur_input_ids[:image_token_start])
+                        )
+                        cur_new_input_embeds.append(cur_image_features)
+                        if labels is not None:
+                            cur_new_labels.append(cur_labels[:image_token_start])
+                            cur_new_labels.append(
+                                torch.full(
+                                    (cur_image_features.shape[0],),
+                                    IGNORE_INDEX,
+                                    device=labels.device,
+                                    dtype=labels.dtype,
+                                )
+                            )
+                            cur_labels = cur_labels[image_token_start + 1 :]
+                    cur_image_idx += 1
+                    if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
+                        self.config, "mm_use_im_start_end", False
+                    ):
+                        cur_input_ids = cur_input_ids[image_token_start + 2 :]
+                    elif getattr(self.config, "mm_use_im_start_end", False):
+                        cur_input_ids = cur_input_ids[image_token_start + 2 :]
+                    else:
+                        cur_input_ids = cur_input_ids[image_token_start + 1 :]
+
             if cur_input_ids.numel() > 0:
                 if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
                     self.config, "mm_use_im_start_end", False

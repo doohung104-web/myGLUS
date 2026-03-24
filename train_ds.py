@@ -103,6 +103,8 @@ def parse_args(args):
     parser.add_argument("--sam_config", default=None, type=str)
     parser.add_argument("--not_use_mem_bank", action="store_true", default=False)
     parser.add_argument("--use_contrastive_loss", action="store_true", default=False)
+    parser.add_argument("--traj_max_time_steps", default=4, type=int,
+                        help="max timesteps for TrajectoryEncoder (should equal question_frame_num)")
     parser.add_argument(
         "--conv_type",
         default="llava_v1",
@@ -155,6 +157,7 @@ def main(args):
         "not_use_mem_bank":args.not_use_mem_bank,
         "base_image_dir": args.dataset_dir,
         "use_contrastive_loss":args.use_contrastive_loss,
+        "traj_max_time_steps": args.traj_max_time_steps,
     }
     collate_fn_args = {
         "tokenizer": tokenizer,
@@ -212,6 +215,7 @@ def main(args):
                                 "vision_tower",
                                 "mm_projector",
                                 "text_hidden_fcs",
+                                "trajectory_encoder",
                             ]
                         ]
                     )
@@ -243,7 +247,8 @@ def main(args):
         if any(
             [
                 x in n
-                for x in ["lm_head", "embed_tokens", "mask_decoder", "text_hidden_fcs"]
+                for x in ["lm_head", "embed_tokens", "mask_decoder", "text_hidden_fcs",
+                          "trajectory_encoder"]
             ]
         ):
             print("n: ", n, "p.shape: ", p.shape)
@@ -495,9 +500,13 @@ def train(
             if args.precision == "fp16":
                 input_dict["images"] = input_dict["images"].half()
                 input_dict["images_clip"] = input_dict["images_clip"].half()
+                if input_dict.get("trajectories") is not None:
+                    input_dict["trajectories"] = input_dict["trajectories"].half()
             elif args.precision == "bf16":
                 input_dict["images"] = input_dict["images"].bfloat16()
                 input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
+                if input_dict.get("trajectories") is not None:
+                    input_dict["trajectories"] = input_dict["trajectories"].bfloat16()
             else:
                 input_dict["images"] = input_dict["images"].float()
                 input_dict["images_clip"] = input_dict["images_clip"].float()
